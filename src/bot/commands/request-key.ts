@@ -1,0 +1,95 @@
+import {
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  MessageFlags,
+} from "discord.js";
+import {
+  ensureUser,
+  ensureGuild,
+  createKeyRequest,
+  updateKeyRequestMessage,
+} from "../../db/users";
+
+export const data = new SlashCommandBuilder()
+  .setName("request-key")
+  .setDescription("Request an API key with budget allocation")
+  .addNumberOption((opt) =>
+    opt
+      .setName("budget")
+      .setDescription("Requested budget in USD (e.g. 5.00)")
+      .setRequired(true)
+      .setMinValue(0.01)
+  )
+  .addStringOption((opt) =>
+    opt
+      .setName("reason")
+      .setDescription("Why you need this key")
+      .setRequired(false)
+  );
+
+export async function execute(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guildId) {
+    await interaction.reply({
+      content: "This command can only be used in a server.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const budgetUsd = interaction.options.getNumber("budget", true);
+  const reason = interaction.options.getString("reason") ?? "No reason provided";
+  const budgetCents = Math.round(budgetUsd * 100);
+
+  await ensureGuild(interaction.guildId);
+  const userId = await ensureUser(
+    interaction.user.id,
+    interaction.guildId
+  );
+
+  const requestId = await createKeyRequest(
+    userId,
+    interaction.guildId,
+    interaction.user.id,
+    budgetCents
+  );
+
+  const embed = new EmbedBuilder()
+    .setTitle("API Key Request")
+    .setColor(0xf5a623)
+    .addFields(
+      { name: "User", value: `<@${interaction.user.id}>`, inline: true },
+      {
+        name: "Requested Budget",
+        value: `$${budgetUsd.toFixed(2)}`,
+        inline: true,
+      },
+      { name: "Reason", value: reason },
+      { name: "Status", value: "Pending", inline: true },
+      { name: "Request ID", value: `#${requestId}`, inline: true }
+    )
+    .setTimestamp();
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`approve_request:${requestId}`)
+      .setLabel("Approve")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`deny_request:${requestId}`)
+      .setLabel("Deny")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  // send the approval embed to the channel
+  const reply = await interaction.reply({
+    embeds: [embed],
+    components: [row],
+    fetchReply: true,
+  });
+
+  await updateKeyRequestMessage(requestId, reply.id, reply.channelId);
+}
