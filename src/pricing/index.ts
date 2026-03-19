@@ -1,4 +1,4 @@
-// Fetches and caches model pricing from models.dev (zai provider)
+// Fetches and caches model specs from models.dev (zai provider)
 // Costs in the TOML are per 1M tokens in USD
 
 const GITHUB_RAW =
@@ -6,15 +6,31 @@ const GITHUB_RAW =
 const MODEL_LIST_API =
   "https://api.github.com/repos/sst/models.dev/contents/providers/zai/models";
 
-export interface ModelPricing {
-  name: string;
-  inputPerMillion: number;
-  outputPerMillion: number;
-  cacheReadPerMillion: number;
-  cacheWritePerMillion: number;
+export interface ModelCost {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
 }
 
-const cache = new Map<string, ModelPricing>();
+export interface ModelLimit {
+  context: number;
+  output: number;
+}
+
+export interface ModelSpec {
+  name: string;
+  tool_call: boolean;
+  reasoning: boolean;
+  attachment: boolean;
+  temperature: boolean;
+  interleaved?: { field: string };
+  cost: ModelCost;
+  limit: ModelLimit;
+  modalities?: { input: string[]; output: string[] };
+}
+
+const cache = new Map<string, ModelSpec>();
 let lastFetch = 0;
 const CACHE_TTL = 1000 * 60 * 60; // 1 hour
 
@@ -85,28 +101,40 @@ async function fetchModelList(): Promise<string[]> {
     .map((i) => i.name.replace(".toml", ""));
 }
 
-async function fetchModelPricing(modelId: string): Promise<ModelPricing | null> {
+async function fetchModelSpec(modelId: string): Promise<ModelSpec | null> {
   const resp = await fetch(`${GITHUB_RAW}/${modelId}.toml`);
   if (!resp.ok) return null;
 
   const raw = await resp.text();
-  const parsed = parseToml(raw);
+  const p = parseToml(raw);
 
-  if (!parsed.cost) return null;
+  if (!p.cost || !p.limit) return null;
 
   return {
-    name: parsed.name || modelId,
-    inputPerMillion: parsed.cost.input ?? 0,
-    outputPerMillion: parsed.cost.output ?? 0,
-    cacheReadPerMillion: parsed.cost.cache_read ?? 0,
-    cacheWritePerMillion: parsed.cost.cache_write ?? 0,
+    name: p.name || modelId,
+    tool_call: p.tool_call ?? false,
+    reasoning: p.reasoning ?? false,
+    attachment: p.attachment ?? false,
+    temperature: p.temperature ?? false,
+    ...(p.interleaved?.field ? { interleaved: { field: p.interleaved.field } } : {}),
+    cost: {
+      input: p.cost.input ?? 0,
+      output: p.cost.output ?? 0,
+      cache_read: p.cost.cache_read ?? 0,
+      cache_write: p.cost.cache_write ?? 0,
+    },
+    limit: {
+      context: p.limit.context ?? 128000,
+      output: p.limit.output ?? 8192,
+    },
+    ...(p.modalities ? { modalities: p.modalities } : {}),
   };
 }
 
 export async function refreshPricing(): Promise<void> {
   const modelIds = await fetchModelList();
   const results = await Promise.allSettled(
-    modelIds.map((id) => fetchModelPricing(id).then((p) => [id, p] as const))
+    modelIds.map((id) => fetchModelSpec(id).then((s) => [id, s] as const))
   );
 
   for (const result of results) {
@@ -116,7 +144,7 @@ export async function refreshPricing(): Promise<void> {
   }
 
   lastFetch = Date.now();
-  console.log(`Pricing cache loaded: ${cache.size} models`);
+  console.log(`Model cache loaded: ${cache.size} models`);
 }
 
 export async function ensurePricing(): Promise<void> {
@@ -125,8 +153,12 @@ export async function ensurePricing(): Promise<void> {
   }
 }
 
-export function getModelPricing(modelId: string): ModelPricing | null {
+export function getModelSpec(modelId: string): ModelSpec | null {
   return cache.get(modelId) || null;
+}
+
+export function listModels(): Map<string, ModelSpec> {
+  return cache;
 }
 
 // 4-tier cost calculation matching closedrouter's approach:
@@ -138,23 +170,18 @@ export function calculateCostCents(
   cacheReadTokens = 0,
   cacheWriteTokens = 0
 ): number {
-  const pricing = cache.get(modelId);
-  if (!pricing) {
-    // fallback: assume $10/1M in, $30/1M out (expensive default to be safe)
+  const spec = cache.get(modelId);
+  if (!spec) {
     const inputCost = (inputTokens / 1_000_000) * 10;
     const outputCost = (outputTokens / 1_000_000) * 30;
     return Math.ceil((inputCost + outputCost) * 100);
   }
 
   const uncachedInput = Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens);
-  const inputCost = (uncachedInput / 1_000_000) * pricing.inputPerMillion;
-  const outputCost = (outputTokens / 1_000_000) * pricing.outputPerMillion;
-  const cacheReadCost = (cacheReadTokens / 1_000_000) * pricing.cacheReadPerMillion;
-  const cacheWriteCost = (cacheWriteTokens / 1_000_000) * pricing.cacheWritePerMillion;
+  const inputCost = (uncachedInput / 1_000_000) * spec.cost.input;
+  const outputCost = (outputTokens / 1_000_000) * spec.cost.output;
+  const cacheReadCost = (cacheReadTokens / 1_000_000) * spec.cost.cache_read;
+  const cacheWriteCost = (cacheWriteTokens / 1_000_000) * spec.cost.cache_write;
 
   return Math.ceil((inputCost + outputCost + cacheReadCost + cacheWriteCost) * 100);
-}
-
-export function listModels(): Map<string, ModelPricing> {
-  return cache;
 }

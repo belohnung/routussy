@@ -3,87 +3,53 @@ import {
   type ChatInputCommandInteraction,
   MessageFlags,
 } from "discord.js";
+import { listModels, ensurePricing, type ModelSpec } from "../../pricing";
 
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || "3000"}`;
 
-const MODELS: Record<string, object> = {
-  "glm-4.5": {
-    name: "GLM-4.5",
-    tool_call: true,
-    reasoning: true,
-    attachment: false,
-    temperature: true,
-    cost: { input: 0.6, output: 2.2, cache_read: 0.11 },
-    limit: { context: 131072, output: 98304 },
-  },
-  "glm-4.5-air": {
-    name: "GLM-4.5-Air",
-    tool_call: true,
-    reasoning: true,
-    attachment: false,
-    temperature: true,
-    cost: { input: 0.2, output: 1.1, cache_read: 0.03 },
-    limit: { context: 131072, output: 98304 },
-  },
-  "glm-4.6": {
-    name: "GLM-4.6",
-    tool_call: true,
-    reasoning: true,
-    attachment: false,
-    temperature: true,
-    cost: { input: 0.6, output: 2.2, cache_read: 0.11 },
-    limit: { context: 204800, output: 131072 },
-  },
-  "glm-4.7": {
-    name: "GLM-4.7",
-    tool_call: true,
-    reasoning: true,
-    interleaved: { field: "reasoning_content" },
-    attachment: false,
-    temperature: true,
-    cost: { input: 0.6, output: 2.2, cache_read: 0.11 },
-    limit: { context: 204800, output: 131072 },
-  },
-  "glm-5": {
-    name: "GLM-5",
-    tool_call: true,
-    reasoning: true,
-    interleaved: { field: "reasoning_content" },
-    attachment: false,
-    temperature: true,
-    cost: { input: 1.0, output: 3.2, cache_read: 0.2 },
-    limit: { context: 204800, output: 131072 },
-  },
-  "glm-5-turbo": {
-    name: "GLM-5-Turbo",
-    tool_call: true,
-    reasoning: true,
-    interleaved: { field: "reasoning_content" },
-    attachment: false,
-    temperature: true,
-    cost: { input: 1.2, output: 4.0, cache_read: 0.24 },
-    limit: { context: 200000, output: 131072 },
-  },
-};
+function specToProviderModel(spec: ModelSpec): object {
+  return {
+    name: spec.name,
+    tool_call: spec.tool_call,
+    reasoning: spec.reasoning,
+    attachment: spec.attachment,
+    temperature: spec.temperature,
+    ...(spec.interleaved ? { interleaved: spec.interleaved } : {}),
+    cost: spec.cost,
+    limit: spec.limit,
+  };
+}
 
 export const data = new SlashCommandBuilder()
   .setName("config")
   .setDescription("Get the opencode provider snippet for this proxy");
 
 export async function execute(interaction: ChatInputCommandInteraction) {
+  await ensurePricing();
+
+  const models: Record<string, object> = {};
+  for (const [id, spec] of listModels()) {
+    models[id] = specToProviderModel(spec);
+  }
+
   const snippet = JSON.stringify(
-    {
-      routussy: {
-        api: `${PUBLIC_URL}/v1`,
-        models: MODELS,
-      },
-    },
+    { routussy: { api: `${PUBLIC_URL}/v1`, models } },
     null,
     2
   );
 
-  await interaction.reply({
-    content: `Add to \`provider\` in \`opencode.json\`:\n\`\`\`json\n${snippet}\n\`\`\`\nSet \`ROUTUSSY_API_KEY\` in your env. Use as \`routussy/glm-5\`, etc.`,
-    flags: MessageFlags.Ephemeral,
-  });
+  // discord message limit is 2000 chars - if the snippet is too long, attach as file
+  if (snippet.length > 1800) {
+    const file = new Blob([snippet], { type: "application/json" });
+    await interaction.reply({
+      content: "Add this to your `provider` block in `opencode.json`.\nSet `ROUTUSSY_API_KEY` in your env. Use as `routussy/<model>`.",
+      files: [{ attachment: Buffer.from(snippet), name: "routussy-provider.json" }],
+      flags: MessageFlags.Ephemeral,
+    });
+  } else {
+    await interaction.reply({
+      content: `Add to \`provider\` in \`opencode.json\`:\n\`\`\`json\n${snippet}\n\`\`\`\nSet \`ROUTUSSY_API_KEY\` in your env. Use as \`routussy/<model>\`.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
 }
